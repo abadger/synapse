@@ -117,7 +117,17 @@ class OEmbedProvider:
                 cache_age = int(cache_age)
 
             # The results.
-            og = {"og:title": result.get("title")}
+            og = {}
+
+            # Use either title or author's name as the title.
+            title = result.get("title") or result.get("author_name")
+            if title:
+                og["og:title"] = title
+
+            # Use the provider name and as the site.
+            provider_name = result.get("provider_name")
+            if provider_name:
+                og["og:site_name"] = provider_name
 
             # If a thumbnail exists, use it. Note that dimensions will be calculated later.
             if "thumbnail_url" in result:
