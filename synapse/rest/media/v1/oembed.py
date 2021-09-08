@@ -119,7 +119,9 @@ class OEmbedProvider:
                 cache_age = int(cache_age)
 
             # The results.
-            og = {}
+            og = {
+                "og:url": url,
+            }
 
             # Use either title or author's name as the title.
             title = result.get("title") or result.get("author_name")
