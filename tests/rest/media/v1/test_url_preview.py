@@ -719,3 +719,107 @@ class URLPreviewTests(unittest.HomeserverTestCase):
         body = channel.json_body
         body.pop("og:url")
         self.assertEqual(body, {"og:description": "Content Preview"})
+
+    def test_oembed_autodiscovery(self):
+        """
+        Autodiscovery works by finding the link in the HTML response and then requesting an oEmbed URL.
+
+        1. Request a preview of a URL which is not known to the oEmbed code.
+        2. It returns HTML including a link to an oEmbed preview.
+        3. The oEmbed preview is requested and returns a URL for an image.
+        4. The image is requested for thumbnailing.
+
+        """
+        # This is a little cheesy in that we use the www subdomain (which isn't the
+        # list of oEmbed patterns) to get "raw" HTML response.
+        self.lookups["www.twitter.com"] = [(IPv4Address, "10.1.2.3")]
+        self.lookups["publish.twitter.com"] = [(IPv4Address, "10.1.2.3")]
+        self.lookups["cdn.twitter.com"] = [(IPv4Address, "10.1.2.3")]
+
+        result = b"""
+        <link rel="alternate" type="application/json+oembed"
+            href="http://publish.twitter.com/oembed?url=http%3A%2F%2Fcdn.twitter.com%2Fmatrixdotorg%2Fstatus%2F12345&format=json"
+            title="matrixdotorg" />
+        """
+
+        end_content = unhexlify(
+            b"89504e470d0a1a0a0000000d4948445200000001000000010806"
+            b"0000001f15c4890000000a49444154789c63000100000500010d"
+            b"0a2db40000000049454e44ae426082"
+        )
+
+        channel = self.make_request(
+            "GET",
+            "preview_url?url=http://www.twitter.com/matrixdotorg/status/12345",
+            shorthand=False,
+            await_result=False,
+        )
+        self.pump()
+
+        client = self.reactor.tcpClients[0][2].buildProtocol(None)
+        server = AccumulatingProtocol()
+        server.makeConnection(FakeTransport(client, self.reactor))
+        client.makeConnection(FakeTransport(server, self.reactor))
+        client.dataReceived(
+            (
+                b"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n"
+                b'Content-Type: text/html; charset="utf8"\r\n\r\n'
+            )
+            % (len(result),)
+            + result
+        )
+
+        self.pump()
+
+        # The oEmbed response.
+        result2 = {
+            "version": "1.0",
+            "type": "photo",
+            "url": "http://cdn.twitter.com/matrixdotorg",
+        }
+        oembed_content = json.dumps(result2).encode("utf-8")
+
+        # Ensure a second request is made to the oEmbed URL.
+        client = self.reactor.tcpClients[1][2].buildProtocol(None)
+        server = AccumulatingProtocol()
+        server.makeConnection(FakeTransport(client, self.reactor))
+        client.makeConnection(FakeTransport(server, self.reactor))
+        client.dataReceived(
+            (
+                b"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n"
+                b'Content-Type: application/json; charset="utf8"\r\n\r\n'
+            )
+            % (len(oembed_content),)
+            + oembed_content
+        )
+
+        self.pump()
+
+        # Ensure the URL is what was requested.
+        self.assertIn(b"/oembed?", server.data)
+
+        # Ensure a third request is made to the photo URL.
+        client = self.reactor.tcpClients[2][2].buildProtocol(None)
+        server = AccumulatingProtocol()
+        server.makeConnection(FakeTransport(client, self.reactor))
+        client.makeConnection(FakeTransport(server, self.reactor))
+        client.dataReceived(
+            (
+                b"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n"
+                b'Content-Type: image/png; charset="utf8"\r\n\r\n'
+            )
+            % (len(end_content),)
+            + end_content
+        )
+
+        self.pump()
+
+        # Ensure the URL is what was requested.
+        self.assertIn(b"/matrixdotorg", server.data)
+
+        self.assertEqual(channel.code, 200)
+        self.assertIn("og:url", channel.json_body)
+        self.assertTrue(channel.json_body["og:image"].startswith("mxc://"))
+        self.assertEqual(channel.json_body["og:image:height"], 1)
+        self.assertEqual(channel.json_body["og:image:width"], 1)
+        self.assertTrue(channel.json_body["og:image:type"].startswith("image/png"))
