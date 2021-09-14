@@ -22,7 +22,7 @@ import re
 import shutil
 import sys
 import traceback
-from typing import TYPE_CHECKING, Dict, Generator, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Dict, Generator, Iterable, Optional, Tuple, Union
 from urllib import parse as urlparse
 
 import attr
@@ -302,19 +302,10 @@ class PreviewUrlResource(DirectServeJsonResource):
                 og = {}
 
         elif oembed_url and _is_json(media_info.media_type):
-            # Handle an oEmbed response.
-            with open(media_info.filename, "r") as utf8_file:
-                oembed_body = utf8_file.read()
-
-            oembed_response = self._oembed.parse_oembed_response(
-                media_info.uri, oembed_body
+            # Handle the oEmbed information.
+            og, expiration_ts_ms = await self._handle_oembed_response(
+                user, media_info, expiration_ts_ms
             )
-            og = oembed_response.og
-
-            # Use the cache age from the oEmbed result, instead of the HTTP response.
-            if oembed_response.cache_age is not None:
-                expiration_ts_ms = oembed_response.cache_age + media_info.created_ts_ms
-
             await self._precache_image_url(user, media_info, og)
 
         else:
@@ -476,6 +467,39 @@ class PreviewUrlResource(DirectServeJsonResource):
                 og["matrix:image:size"] = image_info.media_length
             else:
                 del og["og:image"]
+
+    async def _handle_oembed_response(
+        self, user: str, media_info: MediaInfo, expiration_ts_ms: int
+    ) -> Tuple[JsonDict, int]:
+        """
+        Parse the downloaded oEmbed info and potentially update the cache age / precache images.
+
+        Args:
+            user: The user requesting the media.
+            media_info: The media being previewed.
+            expiration_ts_ms
+
+        Returns:
+            A tuple of:
+                The Open Graph dictionary, if the oEmbed info can be parsed.
+                The (potentially) updated expiration time, in milliseconds.
+        """
+        with open(media_info.filename, "r") as utf8_file:
+            oembed_body = utf8_file.read()
+
+        oembed_response = self._oembed.parse_oembed_response(
+            media_info.uri, oembed_body
+        )
+        og = oembed_response.og
+
+        # If the oEmbed response was parsed, potentially update the expiration
+        # time and pre-cache images.
+        if og:
+            # Use the cache age from the oEmbed result, instead of the HTTP response.
+            if oembed_response.cache_age is not None:
+                expiration_ts_ms = oembed_response.cache_age + media_info.created_ts_ms
+
+        return og, expiration_ts_ms
 
     def _start_expire_url_cache_data(self):
         return run_as_background_process(
